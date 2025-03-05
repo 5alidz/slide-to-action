@@ -6,6 +6,7 @@
     "sourceMap": true,
     "jsx": "react",
     "strict": true,
-    "types": ["react", "react-dom"]
+    "types": ["react", "react-dom"],
+    "allowSyntheticDefaultImports": true
   }
 }

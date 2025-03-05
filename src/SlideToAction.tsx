@@ -1,218 +1,356 @@
-import * as React from 'react';
-import { SwipeCallback, useSwipeable } from 'react-swipeable';
-import {
-  oppositeDir,
-  calcMinMax,
-  calcSnap,
-  elastic,
-  clamp,
-  getDir,
-} from './utils';
+import React from 'react';
+import { clamp } from './utils';
+import { useCallback, useMemo, useRef, useState } from 'react';
+import { useSwipeable } from 'react-swipeable';
 
-const { useState, useCallback, useRef } = React;
+const actions = {
+  left: [1, 2, 3],
+  right: [4, 5],
+};
 
-export interface ActionProps {
-  index: number;
-  progress: number;
-  close(): void;
+const transition = 'transform 0.7s cubic-bezier(0.060, 0.975, 0.195, 0.985)';
+
+const actionIconStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  transition,
+};
+
+function ActionIcon({ children }: { children: React.ReactNode }) {
+  return <div style={actionIconStyle}>{children}</div>;
 }
 
-export type Action = React.FC<ActionProps>;
+const setupConstraints = (
+  actionWidth: number,
+  actionsLeft: unknown[],
+  actionsRight: unknown[]
+) => {
+  const _thresholdRight = actionsRight.length * actionWidth;
+  const _maxElasticityRight = _thresholdRight + _thresholdRight / 4;
+  const _thresholdLeft = actionsLeft.length * actionWidth;
+  const _maxElasticityLeft = _thresholdLeft + _thresholdLeft / 4;
+  const leftActionWidth = actionWidth + _maxElasticityLeft;
+  const rightActionWidth = actionWidth + _maxElasticityRight;
+  return {
+    actionWidth,
+    leftActionWidth,
+    rightActionWidth,
+    _thresholdRight,
+    _maxElasticityRight,
+    _thresholdLeft,
+    _maxElasticityLeft,
+  };
+};
+
+function defaultGetActionTheme(i: number, _dir: 'left' | 'right') {
+  return {
+    backgroundColor: `hsl(${i * 70}, 80%, 50%)`,
+    color: `hsl(${i * 70}, 80%, 30%)`,
+  };
+}
 
 export interface SlideToActionProps {
-  actions: Action[];
-  Content: React.ReactNode;
-  width?: number;
-  actionsContainerClassName?: string;
-  actionsWidth?: number;
-  threshold?: number;
-  openFrom?: 'Left' | 'Right';
-  trackMouse?: boolean;
+  actionsLeft?: React.ReactNode[];
+  actionsRight?: React.ReactNode[];
+  actionWidthPercentage?: number;
+  borderRadius?: string;
+  borderRadiusStrategy?: 'all' | 'actions-only' | 'card-only';
+  getActionTheme?: (
+    i: number,
+    dir: 'left' | 'right'
+  ) => { color: string; backgroundColor: string };
+  children: React.ReactNode;
+}
+
+function createStyles({
+  borderRadius,
+  borderRadiusStrategy,
+  rightActionWidth,
+  leftActionWidth,
+}: {
+  borderRadius: SlideToActionProps['borderRadius'];
+  borderRadiusStrategy: SlideToActionProps['borderRadiusStrategy'];
+  rightActionWidth: number;
+  leftActionWidth: number;
+}) {
+  const actionWrapperStyle = {
+    position: 'absolute',
+    top: 1,
+    left: 1,
+    right: 1,
+    bottom: 1,
+    zIndex: 0,
+    overflow: 'hidden',
+    borderRadius,
+  } as const;
+
+  const cardStyle = {
+    '--translate-x-amount': '0px',
+    'transform': 'translateX(var(--translate-x-amount))',
+    transition,
+    'width': '100%',
+    'height': '100%',
+    'cursor': 'grab',
+    'zIndex': 10,
+    'borderRadius':
+      borderRadiusStrategy === 'card-only' || borderRadiusStrategy === 'all'
+        ? borderRadius
+        : '0px',
+  } as const;
+
+  const actionItemStyle = {
+    display: 'flex',
+    alignItems: 'center',
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    borderRadius:
+      borderRadiusStrategy === 'actions-only' || borderRadiusStrategy === 'all'
+        ? borderRadius
+        : '0px',
+    transform: `translateX(0px)`,
+    transition,
+  } as const;
+
+  const actionItemRightStyle = {
+    // right-specific
+    right: 0,
+    justifyContent: 'end',
+    width: rightActionWidth,
+  } as const;
+
+  const actionItemLeftStyle = {
+    // left-specific
+    left: 0,
+    justifyContent: 'start',
+    width: leftActionWidth,
+  } as const;
+
+  return {
+    actionWrapperStyle,
+    cardStyle,
+    actionItemStyle,
+    actionItemRightStyle,
+    actionItemLeftStyle,
+  };
 }
 
 export function SlideToAction({
-  Content,
-  width,
-  actions,
-  actionsContainerClassName,
-  openFrom,
-  trackMouse = false,
-  actionsWidth = 0.35,
-  threshold = actionsWidth / 2,
+  actionsLeft = actions.left,
+  actionsRight = actions.right,
+  actionWidthPercentage = 0.2,
+  borderRadius = '0px',
+  borderRadiusStrategy = 'all',
+  getActionTheme = defaultGetActionTheme,
+  children,
 }: SlideToActionProps) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const actionsLeftRef = useRef<HTMLDivElement | null>(null);
+  const actionsRightRef = useRef<HTMLDivElement | null>(null);
+  const constraints = useRef<ReturnType<typeof setupConstraints> | null>(null);
+  const [current, setCurrent] = useState<number>(0);
   const [preventScrollOnSwipe, setPreventScrollOnSwipe] = useState(false);
-  const [current, setCurrent] = useState(0);
-  const ref = useRef<HTMLDivElement>(null);
-  const actionsRef = useRef<HTMLDivElement>(null);
-  const [progress, setProgress] = useState(0);
 
-  const onSwiping: SwipeCallback = useCallback(
-    ({ dir, deltaX }) => {
-      const noopDir = dir === 'Up' || dir === 'Down';
-      if (!ref.current || noopDir) return;
-      setPreventScrollOnSwipe(true);
-      const elementDir = getDir(ref.current);
-      const autoOpenFrom = elementDir === 'ltr' ? 'Left' : 'Right';
-      const openDir = openFrom || autoOpenFrom;
-      const [min, max] = calcMinMax(openDir, actionsWidth);
-      const w = ref.current.clientWidth;
-      const amount = clamp(
-        current * w + deltaX,
-        elastic(min, threshold) * w,
-        elastic(max, threshold) * w
-      );
-
-      ref.current.style.transform = `translateX(${amount}px)`;
-      const available = Math.abs(amount / w);
-      actionsRef.current?.style.setProperty('--available', `${available}`);
-      setProgress(Math.abs(available / actionsWidth));
-    },
-    [actionsWidth, openFrom, threshold, current]
-  );
-
-  const onSwiped: SwipeCallback = useCallback(
-    ({ dir, deltaX }) => {
-      setPreventScrollOnSwipe(false);
-      if (!ref.current) return;
-      if (dir === 'Up' || dir === 'Down') {
-        ref.current.style.transform = `translateX(${0}px)`;
-        setCurrent(0);
-        return;
-      }
-      const w = ref.current.clientWidth;
-      const passedThreshold = Math.abs(deltaX) >= threshold * w;
-      const openDir =
-        openFrom || (getDir(ref.current) === 'ltr' ? 'Left' : 'Right');
-      const isOpening = dir === oppositeDir(openDir);
-
-      const [min, max] = calcMinMax(openDir, actionsWidth);
-      const newValue = calcSnap(isOpening, passedThreshold, min, max, current);
-      const snapPixels = newValue * w;
-
-      const amount = clamp(
-        current * w + deltaX,
-        elastic(min, threshold) * w,
-        elastic(max, threshold) * w
-      );
-
-      const snap = () => {
-        if (!ref.current) return;
-        ref.current.style.transform = `translateX(${snapPixels}px)`;
-        actionsRef.current?.style.setProperty(
-          '--available',
-          `${Math.abs(newValue)}`
-        );
-        setCurrent(newValue);
-        setProgress(Math.abs(newValue / actionsWidth));
-      };
-
-      if (snapPixels !== 0 && Math.abs(snapPixels) < Math.abs(amount)) {
-        const maxAmount =
-          openDir === 'Right'
-            ? elastic(min, threshold)
-            : elastic(max, threshold);
-        ref.current.style.transform = `translateX(${maxAmount * w}px)`;
-        actionsRef.current?.style.setProperty(
-          '--available',
-          `${Math.abs(maxAmount)}`
-        );
-        setTimeout(() => {
-          snap();
-        }, 150);
-      } else {
-        snap();
-      }
-    },
-    [actionsWidth, openFrom, threshold, current]
+  const styles = useMemo(
+    () =>
+      createStyles({
+        borderRadius,
+        borderRadiusStrategy,
+        rightActionWidth: constraints.current?.rightActionWidth || 0,
+        leftActionWidth: constraints.current?.leftActionWidth || 0,
+      }),
+    [borderRadius, borderRadiusStrategy, constraints.current]
   );
 
   const onSwipeStart = useCallback(() => {
     setPreventScrollOnSwipe(true);
   }, []);
 
-  const eventHandlers = useSwipeable({
-    onSwipeStart,
+  const handlers = useSwipeable({
     preventScrollOnSwipe,
-    trackMouse,
-    onSwiping,
-    onSwiped,
+    onSwipeStart,
+    trackMouse: true,
+    onSwiping: ({ deltaX, dir }) => {
+      if (!ref.current || !constraints.current) return;
+
+      if (dir === 'Up' || dir === 'Down') return;
+
+      const {
+        _maxElasticityLeft,
+        _maxElasticityRight,
+        _thresholdLeft,
+        _thresholdRight,
+        actionWidth,
+      } = constraints.current;
+
+      setPreventScrollOnSwipe(true); // first
+
+      const isActionsLeft =
+        (dir === 'Right' && current >= 0) || (dir === 'Left' && current > 0);
+
+      if (isActionsLeft && actionsRightRef.current) {
+        actionsRightRef.current.style.display = 'none';
+        if (actionsLeftRef.current) {
+          actionsLeftRef.current.style.display = 'flex';
+        }
+      }
+
+      if (!isActionsLeft && actionsLeftRef.current) {
+        actionsLeftRef.current.style.display = 'none';
+        if (actionsRightRef.current) {
+          actionsRightRef.current.style.display = 'flex';
+        }
+      }
+
+      const actionNode = isActionsLeft
+        ? actionsLeftRef.current
+        : actionsRightRef.current;
+
+      const MAX_ELASTICITY = isActionsLeft
+        ? _maxElasticityLeft
+        : _maxElasticityRight;
+      const THRESHOLD = isActionsLeft ? _thresholdLeft : _thresholdRight;
+
+      const newValue = clamp(
+        current +
+          Math.sign(deltaX) *
+            clamp(Math.abs(deltaX), -MAX_ELASTICITY, MAX_ELASTICITY),
+        -MAX_ELASTICITY,
+        MAX_ELASTICITY
+      );
+
+      const progress = newValue / THRESHOLD;
+
+      if (actionNode) {
+        const children = Array.from(actionNode.children) as HTMLElement[];
+        for (let i = 0; i < children.length; i++) {
+          const child = children[i];
+          const childsChild = child.children[0] as HTMLElement;
+          const percentage = i / children.length;
+          const value = percentage * newValue;
+
+          child.style.transform = `translateX(${clamp(
+            value,
+            -MAX_ELASTICITY,
+            MAX_ELASTICITY
+          )}px)`;
+
+          const middle =
+            (clamp(Math.abs(progress), 0.2, Math.abs(progress)) * actionWidth) /
+            2;
+          const halfChildWidth = childsChild.clientWidth / 2;
+          const offsetAmount = middle - halfChildWidth;
+          childsChild.style.transform = `translateX(${
+            Math.sign(progress) * clamp(offsetAmount, 4, actionWidth)
+          }px)`;
+        }
+      }
+
+      // update the transform
+      ref.current.style.setProperty('--translate-x-amount', `${newValue}px`);
+    },
+    onSwiped: ({ deltaX, dir: _dir }) => {
+      if (!ref.current || !constraints.current) return;
+      // normalize the dir
+      let dir = _dir;
+      if (_dir === 'Up' || _dir === 'Down') {
+        dir = deltaX > 0 ? 'Right' : 'Left';
+      }
+
+      const { _thresholdLeft, _thresholdRight, actionWidth } =
+        constraints.current;
+
+      const isActionsLeft =
+        (dir === 'Right' && current >= 0) || (dir === 'Left' && current > 0);
+
+      const THRESHOLD = isActionsLeft ? _thresholdLeft : _thresholdRight;
+
+      const isPassedThreshold = Math.abs(deltaX) > THRESHOLD / 2;
+
+      const _new = isPassedThreshold
+        ? clamp(current + Math.sign(deltaX) * THRESHOLD, -THRESHOLD, THRESHOLD)
+        : current;
+
+      const actionNode = isActionsLeft
+        ? actionsLeftRef.current
+        : actionsRightRef.current;
+
+      if (actionNode) {
+        const children = Array.from(actionNode.children) as HTMLElement[];
+        for (let i = 0; i < children.length; i++) {
+          const child = children[i];
+          const childsChild = child.children[0] as HTMLElement;
+
+          const closedPos = 0;
+          const openedPos = Math.sign(_new) * i * actionWidth;
+          const isOpened = _new === Math.sign(_new) * THRESHOLD;
+          child.style.transform = `translateX(${
+            isOpened ? openedPos : closedPos
+          }px)`;
+
+          const middle = actionWidth / 2;
+          const halfChildWidth = childsChild.clientWidth / 2;
+          childsChild.style.transform = `translateX(${
+            isOpened ? Math.sign(_new) * (middle - halfChildWidth) : 0
+          }px)`;
+        }
+      }
+
+      setCurrent(_new);
+      ref.current.style.setProperty('--translate-x-amount', `${_new}px`);
+      setPreventScrollOnSwipe(false); // finally
+    },
   });
 
-  const close = useCallback(() => {
-    if (!ref.current) return;
-    ref.current.style.transform = `translateX(${0}px)`;
-    setCurrent(0);
+  const setupCard = useCallback((node: HTMLDivElement | null) => {
+    if (!node) return;
+    ref.current = node;
+
+    const cardWidth = node.clientWidth;
+    // now we calculate the width of an individual action as a percentage of the card width
+    const actionWidth = cardWidth * actionWidthPercentage;
+    constraints.current = setupConstraints(
+      actionWidth,
+      actionsLeft,
+      actionsRight
+    );
   }, []);
 
-  const directionStyle = React.useMemo(() => {
-    if (openFrom === 'Left') {
-      return { left: 0 };
-    } else if (openFrom === 'Right') {
-      return { right: 0 };
-    } else {
-      return { inset: 0 };
-    }
-  }, [openFrom]);
-
   return (
-    <div
-      {...eventHandlers}
-      style={{
-        width: typeof width === 'number' ? `${width}px` : '100%',
-        boxSizing: 'border-box',
-        overflow: 'hidden',
-        position: 'relative',
-      }}
-    >
-      <div
-        ref={actionsRef}
-        style={{
-          ...directionStyle,
-          position: 'absolute',
-          display: 'flex',
-          alignItems: 'center',
-          height: '100%',
-          width: `calc(var(--available)*100%)`,
-        }}
-      >
-        <div
-          className={actionsContainerClassName}
-          style={
-            actionsContainerClassName
-              ? undefined
-              : {
-                  display: 'flex',
-                  alignItems: 'stretch',
-                  width: '100%',
-                  height: '100%',
-                }
-          }
-        >
-          {actions.map((Action, index) => (
-            <Action
-              key={index}
-              index={index}
-              progress={progress}
-              close={close}
-            />
+    <div className='relative' {...handlers}>
+      <div style={styles.actionWrapperStyle}>
+        <div ref={actionsLeftRef}>
+          {actionsLeft.map((C, i) => (
+            <div
+              key={i}
+              style={{
+                ...styles.actionItemStyle,
+                ...styles.actionItemLeftStyle,
+                ...getActionTheme(i, 'left'),
+              }}
+            >
+              <ActionIcon>{C}</ActionIcon>
+            </div>
+          ))}
+        </div>
+        <div ref={actionsRightRef}>
+          {actionsRight.map((C, i) => (
+            <div
+              key={i}
+              style={{
+                ...styles.actionItemStyle,
+                ...styles.actionItemRightStyle,
+                ...getActionTheme(i, 'right'),
+              }}
+            >
+              <ActionIcon>{C}</ActionIcon>
+            </div>
           ))}
         </div>
       </div>
-      <div
-        ref={ref}
-        style={{
-          position: 'relative',
-          display: 'flex',
-          flexWrap: 'nowrap',
-          alignItems: 'stretch',
-          justifyContent: 'flex-start',
-          touchAction: preventScrollOnSwipe ? 'none' : 'auto',
-          transitionProperty: 'transform',
-          transitionDuration: '700ms',
-          transitionTimingFunction: 'cubic-bezier(0.060, 0.975, 0.195, 0.985)',
-        }}
-      >
-        {Content}
+      <div ref={setupCard} style={styles.cardStyle}>
+        {children}
       </div>
     </div>
   );
