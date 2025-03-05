@@ -93,6 +93,7 @@ function createStyles({
     'height': '100%',
     'cursor': 'grab',
     'zIndex': 10,
+    'overflow': 'hidden',
     'borderRadius':
       borderRadiusStrategy === 'card-only' || borderRadiusStrategy === 'all'
         ? borderRadius
@@ -318,7 +319,7 @@ export function SlideToAction({
   }, []);
 
   return (
-    <div className='relative' {...handlers}>
+    <div style={{ position: 'relative' }} {...handlers}>
       <div style={styles.actionWrapperStyle}>
         <div ref={actionsLeftRef}>
           {actionsLeft.map((C, i) => (
